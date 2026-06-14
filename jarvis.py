@@ -116,6 +116,61 @@ def ask_groq(user_input: str) -> str:
     except Exception as e:
         return f"AI error: {e}"
 
+# ── Web Search (DuckDuckGo — no API key needed) ──────────────────────────────
+def web_search(query: str) -> str:
+    """Search using DuckDuckGo API — free, no key needed. Falls back to Groq knowledge."""
+    try:
+        # DuckDuckGo Instant Answers API
+        url = f"https://api.duckduckgo.com/?q={query.replace(' ', '+')}&format=json&no_html=1&skip_disambig=1"
+        r = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0 JARVIS/1.0"})
+        data = r.json()
+
+        # 1. Instant answer (calculations, simple facts)
+        if data.get("Answer"):
+            return data["Answer"]
+
+        # 2. Wikipedia abstract (who is, what is questions)
+        if data.get("AbstractText"):
+            text = data["AbstractText"]
+            sentences = text.split(". ")
+            return ". ".join(sentences[:2]) + "."
+
+        # 3. Related topic snippet
+        topics = data.get("RelatedTopics", [])
+        for topic in topics:
+            if isinstance(topic, dict) and topic.get("Text"):
+                return topic["Text"][:250]
+
+        # 4. Infobox data
+        if data.get("Infobox"):
+            content_list = data["Infobox"].get("content", [])
+            facts = [f"{i.get('label')}: {i.get('value')}" for i in content_list[:3] if i.get("label")]
+            if facts:
+                return ". ".join(facts)
+
+        # 5. Fallback to Groq LLaMA knowledge
+        print("[JARVIS] No web result — using AI knowledge...")
+        return ask_groq(f"Please answer this factual question accurately and concisely: {query}")
+
+    except requests.exceptions.Timeout:
+        return ask_groq(query)
+    except Exception as e:
+        print(f"[JARVIS] Web search error: {e}")
+        return ask_groq(query)
+
+def needs_web_search(text: str) -> bool:
+    """Detect if query needs real-time or factual web data."""
+    web_keywords = [
+        "who is", "what is", "when did", "where is", "how many",
+        "president", "prime minister", "ceo", "founder", "capital",
+        "population", "latest", "current", "today", "news",
+        "score", "match", "winner", "election", "price", "cost",
+        "born", "died", "age of", "height of", "meaning of",
+        "define", "explain", "tell me about", "what happened"
+    ]
+    t = text.lower()
+    return any(kw in t for kw in web_keywords)
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 def get_time():
     now = datetime.datetime.now()
@@ -192,6 +247,13 @@ def route_command(text: str) -> str:
     if any(w in t for w in ["bye", "goodbye", "exit", "quit", "shutdown"]):
         speak("Goodbye Boss. JARVIS going offline.")
         sys.exit(0)
+
+    # Web search for factual/real-time questions
+    if needs_web_search(t):
+        print("[JARVIS] Searching the web...")
+        return web_search(text)
+
+    # General AI conversation
     return ask_groq(text)
 
 # ── Wake Word Loop ────────────────────────────────────────────────────────────
