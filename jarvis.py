@@ -54,14 +54,37 @@ def save_config(cfg):
 CONFIG = load_config()
 
 # ── Voice Output ──────────────────────────────────────────────────────────────
+# Mac voices that can speak Hindi / Bengali properly (built into macOS)
+VOICE_FOR_LANG = {
+    "hi": "Lekha",     # Hindi voice on macOS
+    "bn": "Priya",     # Bengali voice on macOS
+    "en": None,        # use whatever the user configured (e.g. Samantha/Daniel)
+}
+
+def detect_script(text: str) -> str:
+    """Roughly detect Hindi (Devanagari) vs Bengali script vs default English."""
+    for ch in text:
+        code = ord(ch)
+        if 0x0900 <= code <= 0x097F:   # Devanagari block → Hindi
+            return "hi"
+        if 0x0980 <= code <= 0x09FF:   # Bengali block → Bengali
+            return "bn"
+    return "en"
+
 def speak(text: str, wait: bool = True):
     clean = re.sub(r'[*_`#]', '', text)
-    cmd = ["say", "-v", CONFIG["voice"], "-r", str(CONFIG["speaking_rate"]), clean]
+    lang = detect_script(clean)
+    voice = VOICE_FOR_LANG.get(lang) or CONFIG["voice"]
+    cmd = ["say", "-v", voice, "-r", str(CONFIG["speaking_rate"]), clean]
     if wait: subprocess.run(cmd)
     else: subprocess.Popen(cmd)
     print(f"[JARVIS] {clean}")
 
 # ── Voice Input ───────────────────────────────────────────────────────────────
+# Languages JARVIS tries when transcribing your speech.
+# It attempts each in order and keeps the first one that doesn't error out.
+SPEECH_LANGUAGES = ["en-IN", "hi-IN", "bn-IN"]
+
 def listen(timeout=5, phrase_limit=12):
     if not HAS_SR:
         return input("You: ").strip()
@@ -76,24 +99,48 @@ def listen(timeout=5, phrase_limit=12):
         print("[JARVIS] Listening...")
         try:
             audio = r.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
-            text = r.recognize_google(audio)
-            print(f"[YOU] {text}")
-            return text.lower()
         except sr.WaitTimeoutError:
             return None
-        except sr.UnknownValueError:
-            print("[JARVIS] Didn't catch that, Boss.")
-            return None
-        except Exception as e:
-            print(f"[JARVIS] Error: {e}")
-            return None
+
+        # Try English first (fastest/most common), then Hindi, then Bengali
+        for lang in SPEECH_LANGUAGES:
+            try:
+                text = r.recognize_google(audio, language=lang)
+                print(f"[YOU] ({lang}) {text}")
+                return text.lower()
+            except sr.UnknownValueError:
+                continue  # try next language
+            except Exception as e:
+                print(f"[JARVIS] Error: {e}")
+                return None
+
+        print("[JARVIS] Didn't catch that, Boss.")
+        return None
+
 
 # ── AI Brain ──────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are JARVIS, a witty and efficient AI assistant running on a Mac.
 You were built by Rijit Ghosh, a Flutter developer and AI enthusiast from Kolkata, India.
+
+LANGUAGE:
+You understand and can reply in English, Hindi, and Bengali.
+If the user speaks or writes in Hindi or Bengali, reply naturally in that same language (not English).
+If they mix languages (Hinglish/Benglish), match their style.
 Keep responses SHORT (1-3 sentences) unless asked for detail.
+
+PERSONALITY:
 Be helpful, slightly witty, and occasionally call the user 'Boss' like the real JARVIS.
-Never use markdown — you are speaking aloud."""
+Never use markdown — you are speaking aloud.
+
+EMOTIONAL SUPPORT MODE:
+If the user says they feel stressed, sad, tired, anxious, their mood is off, or things feel hectic,
+drop the witty JARVIS tone and talk like a genuine close friend who actually cares.
+Be warm, validate how they feel first before offering any suggestion, and keep it natural and human —
+not clinical, not a generic listicle of tips. One or two small, realistic suggestions are enough
+(like taking a short break, stepping outside, talking to someone, or just resting) — don't lecture.
+Never minimize their feelings or rush to "fix" them. If they seem to be going through something serious
+or ongoing, gently encourage them to talk to someone they trust or a counselor, without being preachy."""
+
 
 conversation_history = []
 
