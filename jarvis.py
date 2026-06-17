@@ -307,8 +307,10 @@ def text_loop():
 def setup():
     print("\n" + "═"*50 + "\n  JARVIS SETUP\n" + "═"*50)
     cfg = load_config()
-    key = input("\nGroq API key (from console.groq.com): ").strip()
+    key = input("\nGroq API key (press Enter to keep current): ").strip()
     if key: cfg["groq_api_key"] = key
+    weather_key = input("OpenWeatherMap API key (press Enter to keep/skip): ").strip()
+    if weather_key: cfg["weather_api_key"] = weather_key
     city = input(f"Your city [{cfg['city']}]: ").strip()
     if city: cfg["city"] = city
     voice = input(f"Mac voice [{cfg['voice']}] (Samantha/Alex/Victoria/Karen): ").strip()
