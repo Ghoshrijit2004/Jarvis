@@ -53,28 +53,41 @@ def save_config(cfg):
 
 CONFIG = load_config()
 
+# ── Active Language State ─────────────────────────────────────────────────────
+# Explicit, user-controlled language mode. Defaults to English. Switched only
+# by a direct voice command ("Jarvis, switch to Hindi/English") —
+# no automatic per-sentence guessing, since that proved unreliable.
+current_language = "en"
+
+LANGUAGE_NAMES = {"en": "English", "hi": "Hindi"}
+RECOGNIZER_CODE = {"en": "en-IN", "hi": "hi-IN"}
+
+def set_language(lang: str):
+    global current_language
+    current_language = lang
+
 # ── Voice Output ──────────────────────────────────────────────────────────────
-# Mac voices that can speak Hindi / Bengali properly (built into macOS)
+# Mac voice that can speak Hindi properly (built into macOS)
 VOICE_FOR_LANG = {
     "hi": "Lekha",     # Hindi voice on macOS
-    "bn": "Priya",     # Bengali voice on macOS
     "en": None,        # use whatever the user configured (e.g. Samantha/Daniel)
 }
 
+
 def detect_script(text: str) -> str:
-    """Roughly detect Hindi (Devanagari) vs Bengali script vs default English."""
+    """Roughly detect Hindi (Devanagari) script vs default English."""
     for ch in text:
         code = ord(ch)
         if 0x0900 <= code <= 0x097F:   # Devanagari block → Hindi
             return "hi"
-        if 0x0980 <= code <= 0x09FF:   # Bengali block → Bengali
-            return "bn"
     return "en"
 
-def speak(text: str, wait: bool = True):
+def speak(text: str, wait: bool = True, lang: str = None):
+    """If lang is given ('en'/'hi') it's trusted directly.
+    Otherwise falls back to guessing from the script of the text."""
     clean = re.sub(r'[*_`#]', '', text)
-    lang = detect_script(clean)
-    voice = VOICE_FOR_LANG.get(lang) or CONFIG["voice"]
+    detected = lang or detect_script(clean)
+    voice = VOICE_FOR_LANG.get(detected) or CONFIG["voice"]
     cmd = ["say", "-v", voice, "-r", str(CONFIG["speaking_rate"]), clean]
     if wait: subprocess.run(cmd)
     else: subprocess.Popen(cmd)
@@ -83,39 +96,85 @@ def speak(text: str, wait: bool = True):
 # ── Voice Input ───────────────────────────────────────────────────────────────
 # Languages JARVIS tries when transcribing your speech.
 # It attempts each in order and keeps the first one that doesn't error out.
-SPEECH_LANGUAGES = ["en-IN", "hi-IN", "bn-IN"]
+def listen_for_wake_word(timeout=None, phrase_limit=4):
+    """Special listener used ONLY for catching the wake word ('Jarvis').
 
-def listen(timeout=5, phrase_limit=12):
+    Unlike listen(), this tries English first regardless of current_language,
+    since the wake word is a name and en-IN reliably catches "Jarvis" even
+    when JARVIS is currently in Hindi mode. We also try the current language
+    as a fallback in case it's caught the Hindi script form instead
+    (जार्विस), which is already handled by is_wake_word().
+    """
     if not HAS_SR:
         return input("You: ").strip()
 
     r = sr.Recognizer()
-    r.energy_threshold = 150            # sensitive — picks up normal speech
-    r.dynamic_energy_threshold = False  # no auto-adjust (causes missed words)
-    r.pause_threshold = 0.5             # balanced speed
+    r.energy_threshold = 150
+    r.dynamic_energy_threshold = False
+    r.pause_threshold = 0.5
     r.phrase_threshold = 0.2
 
     with sr.Microphone() as source:
-        print("[JARVIS] Listening...")
+        print(f"[JARVIS] Listening for wake word...")
         try:
             audio = r.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
         except sr.WaitTimeoutError:
             return None
 
-        # Try English first (fastest/most common), then Hindi, then Bengali
-        for lang in SPEECH_LANGUAGES:
-            try:
-                text = r.recognize_google(audio, language=lang)
-                print(f"[YOU] ({lang}) {text}")
-                return text.lower()
-            except sr.UnknownValueError:
-                continue  # try next language
-            except Exception as e:
-                print(f"[JARVIS] Error: {e}")
-                return None
+    # Try English first (most reliable for catching "Jarvis" by name),
+    # then fall back to whatever language mode is currently active.
+    tried_codes = ["en-IN"]
+    current_code = RECOGNIZER_CODE[current_language]
+    if current_code not in tried_codes:
+        tried_codes.append(current_code)
 
+    for lang_code in tried_codes:
+        try:
+            text = r.recognize_google(audio, language=lang_code)
+            print(f"[HEARD] ({lang_code}) {text}")
+            return text.lower()
+        except sr.UnknownValueError:
+            continue
+        except Exception as e:
+            print(f"[JARVIS] Error: {e}")
+            return None
+
+    return None
+
+def listen(timeout=5, phrase_limit=12):
+    """Returns a tuple: (text, lang_code).
+
+    Uses the explicitly-set `current_language` instead of guessing — free
+    speech APIs don't give reliable per-utterance language confidence, so
+    JARVIS only switches language when you tell it to (see set_language()).
+    """
+    if not HAS_SR:
+        return input("You: ").strip(), current_language
+
+    r = sr.Recognizer()
+    r.energy_threshold = 150
+    r.dynamic_energy_threshold = False
+    r.pause_threshold = 0.5
+    r.phrase_threshold = 0.2
+
+    with sr.Microphone() as source:
+        print(f"[JARVIS] Listening... (mode: {LANGUAGE_NAMES[current_language]})")
+        try:
+            audio = r.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
+        except sr.WaitTimeoutError:
+            return None, None
+
+    lang_code = RECOGNIZER_CODE[current_language]
+    try:
+        text = r.recognize_google(audio, language=lang_code)
+        print(f"[HEARD] ({lang_code}) {text}")
+        return text.lower(), current_language
+    except sr.UnknownValueError:
         print("[JARVIS] Didn't catch that, Boss.")
-        return None
+        return None, None
+    except Exception as e:
+        print(f"[JARVIS] Error: {e}")
+        return None, None
 
 
 # ── AI Brain ──────────────────────────────────────────────────────────────────
@@ -123,9 +182,9 @@ SYSTEM_PROMPT = """You are JARVIS, a witty and efficient AI assistant running on
 You were built by Rijit Ghosh, a Flutter developer and AI enthusiast from Kolkata, India.
 
 LANGUAGE:
-You understand and can reply in English, Hindi, and Bengali.
-If the user speaks or writes in Hindi or Bengali, reply naturally in that same language (not English).
-If they mix languages (Hinglish/Benglish), match their style.
+You can speak English and Hindi. Always follow the explicit language
+instruction given to you for each message — never guess the language from the
+user's wording, since speech recognition may transliterate things oddly.
 Keep responses SHORT (1-3 sentences) unless asked for detail.
 
 PERSONALITY:
@@ -151,9 +210,12 @@ def ask_groq(user_input: str) -> str:
         client = Groq(api_key=CONFIG["groq_api_key"])
         conversation_history.append({"role": "user", "content": user_input})
         history = conversation_history[-10:]
+
+        lang_instruction = f"\n\nIMPORTANT: The user's current language mode is {LANGUAGE_NAMES[current_language]}. Reply ONLY in {LANGUAGE_NAMES[current_language]}, regardless of what language this message is written in."
+
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT + lang_instruction}] + history,
             max_tokens=150,
             temperature=0.7
         )
@@ -275,8 +337,27 @@ def empty_trash():
     return "Trash emptied."
 
 # ── Router ────────────────────────────────────────────────────────────────────
+# Switch-command keywords in every script, since once JARVIS is in Hindi
+# mode the recognizer will return Devanagari script, not Roman letters.
+SWITCH_TRIGGERS = [
+    "switch to", "speak in", "switch language",       # English
+    "स्विच", "में बात", "भाषा बदल",                      # Hindi
+]
+HINDI_TRIGGERS   = ["hindi", "हिंदी", "हिन्दी"]
+ENGLISH_TRIGGERS = ["english", "इंग्लिश", "अंग्रेजी"]
+
 def route_command(text: str) -> str:
     t = text.lower().strip()
+
+    # Explicit language mode switching — checked across all scripts
+    if any(trigger in t for trigger in SWITCH_TRIGGERS):
+        if any(w in t for w in HINDI_TRIGGERS):
+            set_language("hi")
+            return "ठीक है बॉस, अब हिंदी में बात करता हूँ।"
+        if any(w in t for w in ENGLISH_TRIGGERS):
+            set_language("en")
+            return "Alright Boss, switching back to English."
+
     if any(w in t for w in ["time", "date", "day", "clock"]):     return get_time()
     if any(w in t for w in ["weather", "temperature", "degrees"]): return get_weather()
     if "screenshot" in t:                                           return take_screenshot()
@@ -303,18 +384,34 @@ def route_command(text: str) -> str:
     # General AI conversation
     return ask_groq(text)
 
+# ── Wake Word Matching (multi-script) ─────────────────────────────────────────
+# "Jarvis" transliterated/written across the languages JARVIS listens in,
+# since whichever recognizer fires first determines the script we get back.
+WAKE_WORD_VARIANTS = [
+    "jarvis",       # English
+    "जार्विस",       # Hindi (Devanagari)
+    "jarbis", "jarwis", "jervis",  # common mishears/spellings
+]
+
+def is_wake_word(heard: str, configured_wake: str) -> bool:
+    heard = heard.lower().strip()
+    variants = set(WAKE_WORD_VARIANTS)
+    variants.add(configured_wake.lower())
+    return any(v in heard for v in variants)
+
 # ── Wake Word Loop ────────────────────────────────────────────────────────────
 def wake_word_loop():
     wake = CONFIG["wake_word"].lower()
     print(f"\n[JARVIS] Say '{wake}' to activate  |  Ctrl+C to quit\n")
     while True:
-        # Step 1: listen for wake word only
-        heard = listen(timeout=None, phrase_limit=4)
+        # Step 1: listen for wake word only — uses the dedicated multi-language
+        # listener so "Jarvis" is caught regardless of current language mode
+        heard = listen_for_wake_word(timeout=None, phrase_limit=4)
         if not heard:
             continue
 
-        # Check if wake word is in what was heard
-        if wake not in heard:
+        # Check if wake word is in what was heard (any supported script)
+        if not is_wake_word(heard, wake):
             continue
 
         # Step 2: wake word detected — respond and wait
@@ -324,14 +421,15 @@ def wake_word_loop():
 
         # Step 3: listen specifically for the command
         print("[JARVIS] Awaiting command...")
-        command = listen(timeout=8, phrase_limit=15)
+        command, cmd_lang = listen(timeout=8, phrase_limit=15)
 
         if command and command.strip():
-            print(f"[ROUTING] >>> {command}")
+            print(f"[ROUTING] >>> {command}  (lang={cmd_lang})")
             try:
                 reply = route_command(command)
                 print(f"[REPLY] {reply}")
-                speak(reply, wait=True)
+                # Speak the reply in the SAME language the command was spoken in
+                speak(reply, wait=True, lang=cmd_lang)
             except Exception as e:
                 print(f"[ERROR] {e}")
                 speak("Something went wrong Boss.", wait=True)
